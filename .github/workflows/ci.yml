@@ -1,0 +1,36 @@
+name: Verify
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        runtime: [18, 20, 22, 24]
+    services:
+      dynamodb:
+        image: amazon/dynamodb-local:latest
+        ports:
+          - 8000:8000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: npm-shrinkwrap.json
+      - run: npm install --global npm@11
+      - run: npm ci
+      - run: npm run check
+      - run: npm run test:coverage
+      - run: npm run test:install
+        if: matrix.runtime == 22
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.runtime }}
+      - run: node --test tests/integration.test.mjs
+      - run: node --input-type=module -e "import('@jzhuo3/dynamodb-lib').then(m => { if (typeof m.DynamoDBService !== 'function') process.exit(1) })"
+      - run: node -e "if(typeof require('@jzhuo3/dynamodb-lib').DynamoDBService !== 'function') process.exit(1)"
