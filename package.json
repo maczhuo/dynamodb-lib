@@ -64,5 +64,13 @@
   "bundleDependencies": [
     "@aws-sdk/client-dynamodb",
     "@aws-sdk/lib-dynamodb"
-  ]
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maczhuo/dynamodb-lib.git"
+  },
+  "homepage": "https://github.com/maczhuo/dynamodb-lib#readme",
+  "bugs": {
+    "url": "https://github.com/maczhuo/dynamodb-lib/issues"
+  }
 }
