@@ -130,3 +130,9 @@ This preserves the requested compatibility but requires deliberate dependency up
 ## Publishing preparation
 
 See [PUBLISHING.md](PUBLISHING.md) for package ownership, authentication, licensing and release steps. No credentials belong in this repository.
+
+## License
+
+Licensed under the [MIT License](LICENSE). Copyright (c) 2026 jzhuo3.
+
+Commercial use, modification and redistribution are permitted under the license terms. Bundled dependencies retain their own licenses and notices.

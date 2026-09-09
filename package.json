@@ -2,6 +2,8 @@
   "name": "@jzhuo3/dynamodb-lib",
   "version": "0.1.0",
   "description": "Framework-independent DynamoDB document service and expression builders",
+  "license": "MIT",
+  "author": "jzhuo3",
   "type": "module",
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.js",
@@ -19,6 +21,7 @@
     }
   },
   "files": [
+    "LICENSE",
     "dist",
     "README.md",
     "PUBLISHING.md",

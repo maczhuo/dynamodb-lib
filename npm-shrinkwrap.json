@@ -7,6 +7,7 @@
     "": {
       "name": "@jzhuo3/dynamodb-lib",
       "version": "0.1.0",
+      "license": "MIT",
       "bundleDependencies": [
         "@aws-sdk/client-dynamodb",
         "@aws-sdk/lib-dynamodb"
