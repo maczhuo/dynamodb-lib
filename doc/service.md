@@ -216,3 +216,15 @@ logger.warn('DynamoDB retrying unprocessed batch items', {
 ```
 
 Retry warnings describe retries performed by this library, not retries internal to the AWS SDK. Debug messages are diagnostic output, not a stable audit-event API.
+
+### Testing with Winston
+
+The integration suite injects a real Winston logger with a JSON console transport. Winston is a development dependency only; consumers still choose their own logger. Debug output is enabled by default so you can see requests, pagination, and outcomes while testing:
+
+```sh
+npm run test:integration
+npm run test:integration -- --log-level warn
+DYNAMODB_TEST_LOG_LEVEL=error npm run test:integration
+```
+
+`--log-level` overrides `DYNAMODB_TEST_LOG_LEVEL`. Supported levels are Winston's standard npm levels: `error`, `warn`, `info`, `http`, `verbose`, `debug`, and `silly`. The unit suite also sends library events through a real Winston JSON stream transport and checks debug/warn/error metadata and payload omission; other unit tests retain spies for precise assertions.

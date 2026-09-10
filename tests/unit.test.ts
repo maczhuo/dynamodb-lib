@@ -1,3 +1,6 @@
+import winston from 'winston';
+import { PassThrough } from 'node:stream';
+import { once } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DynamoDBDocumentClient, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import * as lib from '../src/index.js';
@@ -311,5 +314,44 @@ describe('operational logging', () => {
     expect(logger.warn).toHaveBeenCalledWith('DynamoDB retrying transaction conflict', { mode: 'WRITE', attempt: 1, maxAttempts: 3, delayMs: 50 });
     expect(logger.debug).toHaveBeenCalledWith('DynamoDB transaction completed', { mode: 'WRITE', itemCount: 1 });
     expect(JSON.stringify([logger.debug.mock.calls, logger.warn.mock.calls])).not.toContain('private-');
+  });
+});
+
+
+describe('real Winston compatibility', () => {
+  it('serializes debug, warn and error metadata without leaking request data', async () => {
+    const stream = new PassThrough();
+    const output: string[] = [];
+    stream.on('data', chunk => output.push(chunk.toString()));
+    const realLogger = winston.createLogger({
+      level: 'debug',
+      format: winston.format.json(),
+      transports: [new winston.transports.Stream({ stream })],
+    });
+    // This assignment also documents the intended structural compatibility.
+    const injectedLogger: lib.DynamoDBLogger = realLogger;
+    const service = new lib.DynamoDBService({ tables, region: 'us-east-1', credentials: { accessKeyId: 'local', secretAccessKey: 'local' } }, injectedLogger);
+    instances.push(service);
+    const send = vi.spyOn(DynamoDBDocumentClient.prototype, 'send');
+    try {
+      send.mockResolvedValueOnce({ Item: { Id: 'private-key', Token: 'private-value' } } as never)
+        .mockRejectedValueOnce(Object.assign(new Error('private-reason'), { name: 'TransactionCanceledException', CancellationReasons: [{ Code: 'TransactionConflict' }] }))
+        .mockResolvedValueOnce({} as never)
+        .mockRejectedValueOnce(Object.assign(new Error('private-error'), { name: 'ValidationException' }));
+      await service.getOne('items', 'private-key');
+      await service.transaction({ mode: lib.DynamoDBTransactionMode.WRITE }).createOne('items', 'private-key', { token: 'private-value' }).commit();
+      await expect(service.getOne('items', 'private-key')).rejects.toMatchObject({ status: 400 });
+      const finished = once(realLogger, 'finish');
+      realLogger.end();
+      await finished;
+      const records = output.join('').trim().split('\n').map(line => JSON.parse(line));
+      expect(records).toContainEqual(expect.objectContaining({ level: 'debug', message: 'DynamoDB getOne completed', tableKey: 'items', outcome: 'found' }));
+      expect(records).toContainEqual(expect.objectContaining({ level: 'warn', message: 'DynamoDB retrying transaction conflict', attempt: 1, delayMs: 50 }));
+      expect(records).toContainEqual(expect.objectContaining({ level: 'error', errorName: 'ValidationException', tableKey: 'items' }));
+      expect(output.join('')).not.toContain('private-');
+    } finally {
+      realLogger.close();
+      stream.destroy();
+    }
   });
 });

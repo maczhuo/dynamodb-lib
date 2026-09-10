@@ -1,5 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
+import winston from 'winston';
 import { randomUUID } from 'node:crypto';
 import { DynamoDBClient, CreateTableCommand, DeleteTableCommand, UpdateTimeToLiveCommand, waitUntilTableExists } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
@@ -14,7 +15,14 @@ const client = new DynamoDBClient(config);
 const document = DynamoDBDocumentClient.from(client);
 const table = { name, partitionKey: 'Pk', partitionKeyType: 'S', sortKey: 'Sk', sortKeyType: 'S', timeToLiveAttribute: 'ExpiresAt', globalSecondaryIndexes: [{ indexName: 'ByGroup', partitionKey: 'Group', sortKey: 'Rank', projectionType: 'ALL' }], localSecondaryIndexes: [{ indexName: 'ByRank', sortKey: 'Rank', projectionType: 'ALL' }] };
 const tables = new Map([['items', table]]);
-const service = new DynamoDBService({ ...config, tables });
+const logLevel = process.env.DYNAMODB_TEST_LOG_LEVEL || 'debug';
+if (!Object.hasOwn(winston.config.npm.levels, logLevel)) throw new Error('Invalid DYNAMODB_TEST_LOG_LEVEL');
+const logger = winston.createLogger({
+  level: logLevel,
+  format: winston.format.json(),
+  transports: [new winston.transports.Console()],
+});
+const service = new DynamoDBService({ ...config, tables }, logger);
 const createdTables = [];
 before(async () => {
   console.log(`Integration target: ${endpoint || 'AWS'}; temporary table: ${name}`);
@@ -41,7 +49,7 @@ after(async () => {
     const failed = results.filter(r => r.status === 'rejected');
     if (failed.length) throw new AggregateError(failed.map(r => r.reason), `Test table cleanup failed: ${createdTables.join(', ')}`);
   }
-  finally { service.destroy(); client.destroy(); }
+  finally { service.destroy(); client.destroy(); logger.close(); }
 });
 
 test('CRUD, conflict behavior, nested values, casing and projections', async () => {
