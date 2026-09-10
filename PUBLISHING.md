@@ -34,7 +34,15 @@ npm publish --access public
 
 `prepublishOnly` runs the source, unit, build and package checks. Integration tests are explicit because they require an available database; CI runs them against DynamoDB Local. The AWS SDK dependency tree is deliberately bundled with the archive, alongside `npm-shrinkwrap.json`, to preserve the tested Node 18-compatible, patched dependencies. After updating dependencies, refresh the shrinkwrap and run the clean consumer installation check as well as the Node runtime matrix.
 
-This repository contains a verification workflow, but no automatic publishing trigger; the actual release identity and credentials still need to be configured.
+## Automated publishing
+
+Commit and push the workflows and both Release Please configuration files before creating the next release. `release-please.yml` uses the repository variable `RELEASE_APP_CLIENT_ID` and secret `RELEASE_APP_PRIVATE_KEY` to prepare release PRs and create GitHub releases after those PRs are merged.
+
+When a non-prerelease GitHub release is published, `.github/workflows/publish.yml` checks that its tag is `vX.Y.Z` and matches `package.json`. It runs the reusable CI workflow against that exact commit, including unit, package, coverage, clean installation, and DynamoDB Local integration checks across Node 18, 20, 22, and 24. Only after verification passes does its `publish` job enter the `npm` environment and publish using Node 24 and npm 11. Draft releases and prereleases do not publish to npm.
+
+Configure the npm package's GitHub Actions trusted publisher with owner `maczhuo`, repository `dynamodb-lib`, workflow filename `publish.yml`, environment `npm`, and permission for direct `npm publish`. The GitHub environment `npm` must allow release tags such as `v*`. No `NPM_TOKEN` is required. Any environment approval rules will pause the publish job until satisfied.
+
+The workflow does not retroactively publish existing GitHub releases. If a run fails before publication, fix the external configuration and rerun the failed jobs from GitHub Actions. An already published npm version cannot be published again; code or workflow fixes require a new release containing those changes. Initial package creation may still require the manual bootstrap described above.
 
 Official references (checked September 2026):
 

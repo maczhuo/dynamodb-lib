@@ -2,6 +2,12 @@ name: Verify
 on:
   push:
   pull_request:
+  workflow_call:
+    inputs:
+      ref:
+        description: Exact commit to verify before publishing
+        required: true
+        type: string
 permissions:
   contents: read
 jobs:
@@ -16,21 +22,24 @@ jobs:
         ports:
           - 8000:8000
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: npm-shrinkwrap.json
+          package-manager-cache: false
       - run: npm install --global npm@11
       - run: npm ci
       - run: npm run check
       - run: npm run test:coverage
       - run: npm run test:install
         if: matrix.runtime == 22
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: ${{ matrix.runtime }}
+          package-manager-cache: false
       - run: node --test tests/integration.test.mjs
       - run: node --input-type=module -e "import('@jzhuo3/dynamodb-lib').then(m => { if (typeof m.DynamoDBService !== 'function') process.exit(1) })"
       - run: node -e "if(typeof require('@jzhuo3/dynamodb-lib').DynamoDBService !== 'function') process.exit(1)"
