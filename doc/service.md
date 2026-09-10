@@ -192,3 +192,27 @@ db.destroy();
 ```
 
 In Lambda, keep the service outside the handler and reuse it across invocations. Calling `destroy` at the end of every handler invocation prevents connection reuse.
+
+## Logging
+
+Pass a logger implementing `debug(message, ...meta)`, `warn(message, ...meta)`, and `error(message, ...meta)`. Logging is silent when no logger is supplied. Messages use a readable string followed by a structured metadata object; Winston does not need interpolation formatting to display them.
+
+- **Debug:** individual requests and their outcomes, batch sizes and completion counts, query pages and whether more pages exist, transaction start/completion, and expected conditional write skips. Batch read completion counts exclude missing and expired items; query page counts describe the DynamoDB response before local TTL filtering.
+- **Warn:** retrying unprocessed batch items or transaction conflicts, including attempt and delay in milliseconds; LSI projections that may incur additional reads.
+- **Error:** failed requests, invalid GSI projections, and exhausted batch or transaction retries. SDK errors retain their original cause for the caller; logs include the error name instead of the raw error message.
+
+Logs omit primary key values, item contents, expression text and bindings, cursors, credentials, and raw request options. Metadata can include your configured table alias (`tableKey`) and index names, so choose aliases appropriate for your logging environment. Expected missing/expired records and unmet write conditions are not warnings.
+
+For example, an unprocessed batch produces:
+
+```ts
+logger.warn('DynamoDB retrying unprocessed batch items', {
+  operation: 'getMany',
+  tableKey: 'items',
+  itemCount: 2,
+  attempt: 1,
+  delayMs: 50, // Actual delay includes backoff jitter.
+});
+```
+
+Retry warnings describe retries performed by this library, not retries internal to the AWS SDK. Debug messages are diagnostic output, not a stable audit-event API.

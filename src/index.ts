@@ -27,7 +27,6 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import { diff, camel, snake } from 'radash';
 
-
 export type DynamoDBGSIConfig = {
   indexName: string;
   partitionKey: string;
@@ -803,6 +802,7 @@ export class DynamoDBTransaction {
           if (i === retries - 1) {
             throw error;
           }
+          this.logger.warn('DynamoDB retrying transaction conflict', { mode: this.mode, attempt: i + 1, maxAttempts: retries, delayMs: delay * (i + 1) });
           await new Promise(resolve => setTimeout(resolve, delay * (i + 1)));
         } else {
           throw error;
@@ -1166,17 +1166,6 @@ export class DynamoDBTransaction {
       ExpressionAttributeValues[attributeValueVariable] = value;
     });
 
-    this.logger.debug('Update Expression: %s', UpdateExpression);
-    this.logger.debug('Condition Expression: %s', ConditionExpression);
-    this.logger.debug(
-      'Expression Attribute Names: %o',
-      ExpressionAttributeNames,
-    );
-    this.logger.debug(
-      'Expression Attribute Values: %o',
-      ExpressionAttributeValues,
-    );
-
     this.transactWriteItems.push({
       Update: {
         TableName: table.name,
@@ -1274,6 +1263,7 @@ export class DynamoDBTransaction {
     const result: DynamoDBTransactionResult<T | null> = {
       numberOfTransactItems: 0,
     };
+    this.logger.debug('DynamoDB transaction started', { mode: this.mode, itemCount: this.mode === DynamoDBTransactionMode.READ ? this.transactGetItems.length : this.transactWriteItems.length });
     switch (this.mode) {
       case DynamoDBTransactionMode.READ:
         command = new TransactGetCommand({
@@ -1289,21 +1279,19 @@ export class DynamoDBTransaction {
         ).catch((e: Error) => {
           this._cleanup();
           if (isTransactionConflictError(e)) {
-            this.logger.error(
-              'Transaction conflict due to TransactionConflict',
-            );
+            this.logger.error('DynamoDB transaction conflict retry limit reached', { errorName: e.name });
             throw new DynamoDBError(409, {
               message: e.message,
               cause: e,
             });
           } else if (e.name === 'TransactionCanceledException') {
-            this.logger.error(e.message);
+            this.logger.error('DynamoDB transaction canceled', { errorName: e.name });
             throw new DynamoDBError(400, {
               message: e.message,
               cause: e,
             });
           } else {
-            this.logger.error('Transaction failed due to %s', e.message);
+            this.logger.error('Transaction failed', { errorName: e.name });
             throw new DynamoDBError(500, {
               message: e.message,
               cause: e,
@@ -1357,30 +1345,25 @@ export class DynamoDBTransaction {
         ).catch((e: Error) => {
           this._cleanup();
           if (isTransactionConflictError(e)) {
-            this.logger.error(
-              'Transaction conflict due to TransactionConflict',
-            );
+            this.logger.error('DynamoDB transaction conflict retry limit reached', { errorName: e.name });
             throw new DynamoDBError(409, {
               message: e.message,
               cause: e,
             });
           } else if (e.name === 'TransactionCanceledException') {
-            this.logger.error(e.message);
+            this.logger.error('DynamoDB transaction canceled', { errorName: e.name });
             throw new DynamoDBError(400, {
               message: e.message,
               cause: e,
             });
           } else if (e.name === 'ValidationException') {
-            this.logger.error(
-              'The request parameters are invalid with error: %s',
-              e.message,
-            );
+            this.logger.error('The request parameters are invalid', { errorName: e.name });
             throw new DynamoDBError(400, {
               message: 'Invalid request parameters',
               cause: e,
             });
           } else {
-            this.logger.error('Transaction failed due to %s', e.message);
+            this.logger.error('Transaction failed', { errorName: e.name });
             throw new DynamoDBError(500, {
               message: e.message,
               cause: e,
@@ -1394,6 +1377,7 @@ export class DynamoDBTransaction {
         throw new Error('Invalid transaction mode');
     }
 
+    this.logger.debug('DynamoDB transaction completed', { mode: this.mode, itemCount: result.numberOfTransactItems });
     return result;
   }
 }
@@ -1485,11 +1469,8 @@ export default class DynamoDBService {
         },
       );
     }
-    this.logger.debug('Projection Expression: %s', ProjectionExpression);
-    this.logger.debug(
-      'Expression Attribute Names: %o',
-      ExpressionAttributeNames,
-    );
+
+    this.logger.debug('DynamoDB request started', { operation: 'getOne', tableKey });
     const getCommand = new GetCommand({
       TableName: table.name,
       Key: keys,
@@ -1506,25 +1487,13 @@ export default class DynamoDBService {
       .send(getCommand)
       .catch((e: Error) => {
         if (e.name === 'ValidationException') {
-          this.logger.error(
-            'The request parameters are invalid with error: %s',
-            e.message,
-            {
-              tableKey,
-              primaryKey,
-              opts,
-            },
-          );
+          this.logger.error('The request parameters are invalid', { errorName: e.name, tableKey });
           throw new DynamoDBError(400, {
             message: 'Invalid request parameters',
             cause: e,
           });
         } else {
-          this.logger.error('Failed to get item with error: %s', e.message, {
-            tableKey,
-            primaryKey,
-            opts,
-          });
+          this.logger.error('Failed to get item', { errorName: e.name, tableKey });
           throw new DynamoDBError(500, {
             message: 'Failed to get item',
             cause: e,
@@ -1535,6 +1504,7 @@ export default class DynamoDBService {
     if (item && table.timeToLiveAttribute && item[table.timeToLiveAttribute] !== undefined) {
       const now = getUnixTime(new Date());
       if (item[table.timeToLiveAttribute] <= now) {
+        this.logger.debug('DynamoDB getOne completed', { tableKey, outcome: 'expired' });
         return null;
       }
 
@@ -1543,6 +1513,7 @@ export default class DynamoDBService {
         delete item[table.timeToLiveAttribute];
       }
     }
+    this.logger.debug('DynamoDB getOne completed', { tableKey, outcome: item ? 'found' : 'not-found' });
     // Item will be undefined if not found
     // Convert keys back to camelCase if camelOrSnake is 'camel' or to snake_case if camelOrSnake is 'snake'
     if (item) {
@@ -1589,7 +1560,7 @@ export default class DynamoDBService {
     const keys = primaryKeys.map((primaryKey, indx) => {
       const isArrayOfKeys = Array.isArray(primaryKey);
       const pkStr = serializeKey(primaryKey);
-      this.logger.debug('Primary Key: %s', pkStr);
+
       if (pkIndexMap.has(pkStr)) {
         throw new Error(`Duplicate primary key: ${pkStr}`);
       }
@@ -1646,17 +1617,13 @@ export default class DynamoDBService {
         },
       );
     }
-    this.logger.debug('Projection Expression: %s', ProjectionExpression);
-    this.logger.debug(
-      'Expression Attribute Names: %o',
-      ExpressionAttributeNames,
-    );
 
     const results = new Array(primaryKeys.length).fill(null);
     const now = getUnixTime(new Date());
     let unprocessedAttempt = 0;
     while (keys.length > 0) {
       const batch = keys.splice(0, 100);
+      this.logger.debug('DynamoDB batch request started', { operation: 'getMany', tableKey, itemCount: batch.length });
       const batchGetCommand = new BatchGetCommand({
         RequestItems: {
           [table.name]: {
@@ -1673,21 +1640,26 @@ export default class DynamoDBService {
       });
 
       const { Responses: responses, UnprocessedKeys: rawUnprocessedKeys } =
-        await this.ddbDocClient.send(batchGetCommand);
+        await this.ddbDocClient.send(batchGetCommand).catch((error: Error) => {
+          this.logger.error('Failed to get items', { tableKey, errorName: error.name });
+          throw error;
+        });
       const items =
         responses && responses[table.name] ? responses[table.name] : [];
       const unprocessedKeys =
         (rawUnprocessedKeys && rawUnprocessedKeys[table.name]?.Keys) || [];
-      this.logger.debug(`GetMany Responsed Items: %o`, items);
-      this.logger.debug('Now: %d', now);
+
       if (unprocessedKeys.length > 0) {
         if (unprocessedAttempt >= MAX_UNPROCESSED_ATTEMPTS) {
+          this.logger.error('DynamoDB batch retry limit reached', { operation: 'getMany', tableKey, retryCount: unprocessedAttempt });
           throw new DynamoDBError(500, {
             message: 'Failed to retrieve items after multiple attempts',
             cause: new Error('Too many unprocessed items'),
           });
         }
-        await sleep(backoffDelayMs(unprocessedAttempt));
+        const delayMs = backoffDelayMs(unprocessedAttempt);
+        this.logger.warn('DynamoDB retrying unprocessed batch items', { operation: 'getMany', tableKey, itemCount: unprocessedKeys.length, attempt: unprocessedAttempt + 1, delayMs });
+        await sleep(delayMs);
         unprocessedAttempt += 1;
       } else {
         unprocessedAttempt = 0;
@@ -1713,7 +1685,7 @@ export default class DynamoDBService {
         const pkStr = serializeKey(table.sortKey
           ? [item[table.partitionKey], item[table.sortKey]]
           : item[table.partitionKey]);
-        this.logger.debug('Primary Key: %s', pkStr);
+
         //  Delete the primary key values from the item if not requested
         if (optIncludePartitionKey === false) {
           delete item[table.partitionKey];
@@ -1741,6 +1713,7 @@ export default class DynamoDBService {
       });
     }
 
+    this.logger.debug('DynamoDB getMany completed', { tableKey, requestedCount: primaryKeys.length, returnedCount: results.filter(item => item !== null).length });
     return results;
   }
 
@@ -1965,7 +1938,6 @@ export default class DynamoDBService {
                 indexName: (indexToScan as DynamoDBLSIConfig).indexName,
                 projectionType: (indexToScan as DynamoDBLSIConfig)
                   .projectionType,
-                projectionFields,
               },
             );
           }
@@ -2000,13 +1972,12 @@ export default class DynamoDBService {
           }
           if (hasFieldNotInsideGSIProjection) {
             this.logger.error(
-              'Some of the projection fields are not included in the GSI projection, which may cause additional read cost',
+              'Some of the projection fields are not included in the GSI projection, so the query cannot be executed',
               {
                 tableKey,
                 indexName: (indexToScan as DynamoDBGSIConfig).indexName,
                 projectionType: (indexToScan as DynamoDBGSIConfig)
                   .projectionType,
-                projectionFields,
               },
             );
             throw new Error(
@@ -2087,18 +2058,6 @@ export default class DynamoDBService {
       ExpressionAttributeValues[attributeValueVariable] = value;
     });
 
-    this.logger.debug('Projection Expression: %s', ProjectionExpression);
-    this.logger.debug(
-      'Expression Attribute Names: %o',
-      ExpressionAttributeNames,
-    );
-    this.logger.debug(
-      'Expression Attribute Values: %o',
-      ExpressionAttributeValues,
-    );
-    this.logger.debug('Key Condition Expression: %s', KeyConditionExpression);
-    this.logger.debug('Filter Expression: %s', FilterExpression);
-
     const numOfNeededItems = opts.limit; // May be undefined then no limit
     const result: DynamoDBFindResult<T> = {
       items: [],
@@ -2170,37 +2129,25 @@ export default class DynamoDBService {
     };
 
     while (true) {
+      this.logger.debug('DynamoDB query page requested', { tableKey, hasCursor: !!params.ExclusiveStartKey, hasFilter: !!params.FilterExpression });
       const { Items, LastEvaluatedKey } = await this.ddbDocClient
         .send(new QueryCommand(params))
         .catch((e: Error) => {
           if (e.name === 'ValidationException') {
-            this.logger.error(
-              'The request parameters are invalid with error: %s',
-              e.message,
-              {
-                tableKey,
-                keyCondition,
-                filter,
-                opts,
-              },
-            );
+            this.logger.error('The request parameters are invalid', { errorName: e.name, tableKey });
             throw new DynamoDBError(400, {
               message: 'Invalid request parameters',
               cause: e,
             });
           }
-          this.logger.error('Failed to query items with error: %s', e.message, {
-            tableKey,
-            keyCondition,
-            filter,
-            opts,
-          });
+          this.logger.error('Failed to query items', { errorName: e.name, tableKey });
           throw new DynamoDBError(500, {
             message: 'Failed to query items',
             cause: e,
           });
         });
 
+      this.logger.debug('DynamoDB query page received', { tableKey, itemCount: Items?.length ?? 0, hasMore: !!LastEvaluatedKey });
       if (LastEvaluatedKey) {
         params.ExclusiveStartKey = LastEvaluatedKey;
       }
@@ -2368,6 +2315,7 @@ export default class DynamoDBService {
       });
     }
 
+    this.logger.debug('DynamoDB request started', { operation: 'createOne', tableKey });
     const putCommand = new PutCommand({
       TableName: table.name,
       Item: normalizedItem,
@@ -2432,22 +2380,10 @@ export default class DynamoDBService {
         error.name === 'ConditionalCheckFailedException' &&
         opts.onConflict === 'ignore'
       ) {
-        this.logger.debug(
-          'Item %s already exists',
-          normalizedItem[table.partitionKey] +
-          (table.sortKey ? `:${normalizedItem[table.sortKey]}` : ''),
-        );
+        this.logger.debug('DynamoDB create skipped: item already exists', { tableKey });
         result.created = false;
       } else {
-        this.logger.error(
-          'Failed to create item with error: %s',
-          error.message,
-          {
-            tableKey,
-            item: normalizedItem,
-            opts,
-          },
-        );
+        this.logger.error('Failed to create item', { errorName: error.name, tableKey });
         throw new DynamoDBError(500, {
           message: 'Failed to create item',
           cause: error,
@@ -2455,6 +2391,7 @@ export default class DynamoDBService {
       }
     }
 
+    this.logger.debug('DynamoDB createOne completed', { tableKey, created: result.created });
     return result;
   }
 
@@ -2520,6 +2457,7 @@ export default class DynamoDBService {
     while (normalizedItems.length > 0) {
       const batch = normalizedItems.splice(0, 25);
 
+      this.logger.debug('DynamoDB batch request started', { operation: 'createMany', tableKey, itemCount: batch.length });
       const batchWriteCommand = new BatchWriteCommand({
         RequestItems: {
           [table.name]: batch.map(item => ({
@@ -2535,15 +2473,7 @@ export default class DynamoDBService {
       const { UnprocessedItems } = await this.ddbDocClient
         .send(batchWriteCommand)
         .catch((e: Error) => {
-          this.logger.error(
-            'Failed to create items with error: %s',
-            e.message,
-            {
-              tableKey,
-              items: batch,
-              opts,
-            },
-          );
+          this.logger.error('Failed to create items', { errorName: e.name, tableKey });
           throw new DynamoDBError(500, {
             message: 'Failed to create items',
             cause: e,
@@ -2553,12 +2483,15 @@ export default class DynamoDBService {
       const unprocessedItems = UnprocessedItems?.[table.name];
       if (unprocessedItems !== undefined && unprocessedItems.length > 0) {
         if (unprocessedAttempt >= MAX_UNPROCESSED_ATTEMPTS) {
+          this.logger.error('DynamoDB batch retry limit reached', { operation: 'createMany', tableKey, retryCount: unprocessedAttempt });
           throw new DynamoDBError(500, {
             message: 'Failed to create items after multiple attempts',
             cause: new Error('Too many unprocessed items'),
           });
         }
-        await sleep(backoffDelayMs(unprocessedAttempt));
+        const delayMs = backoffDelayMs(unprocessedAttempt);
+        this.logger.warn('DynamoDB retrying unprocessed batch items', { operation: 'createMany', tableKey, itemCount: unprocessedItems.length, attempt: unprocessedAttempt + 1, delayMs });
+        await sleep(delayMs);
         unprocessedAttempt += 1;
         normalizedItems.push(
           ...(unprocessedItems
@@ -2570,6 +2503,7 @@ export default class DynamoDBService {
       }
     }
 
+    this.logger.debug('DynamoDB createMany completed', { tableKey, itemCount: result.numberOfItems });
     return result;
   }
 
@@ -2690,17 +2624,7 @@ export default class DynamoDBService {
       ExpressionAttributeValues[attributeValueVariable] = value;
     });
 
-    this.logger.debug('Update Expression: %s', UpdateExpression);
-    this.logger.debug('Condition Expression: %s', ConditionExpression);
-    this.logger.debug(
-      'Expression Attribute Names: %o',
-      ExpressionAttributeNames,
-    );
-    this.logger.debug(
-      'Expression Attribute Values: %o',
-      ExpressionAttributeValues,
-    );
-
+    this.logger.debug('DynamoDB request started', { operation: 'update', tableKey });
     const updateCommand = new UpdateCommand({
       TableName: table.name,
       Key: keys,
@@ -2739,38 +2663,15 @@ export default class DynamoDBService {
     } catch (e: any) {
       const error = e as Error;
       if (error.name === 'ValidationException') {
-        this.logger.error(
-          'The request parameters are invalid with error: %s',
-          error.message,
-          {
-            tableKey,
-            primaryKey,
-            commands,
-            condition,
-            opts,
-          },
-        );
+        this.logger.error('The request parameters are invalid', { errorName: error.name, tableKey });
         throw new DynamoDBError(400, {
           message: 'Invalid request parameters',
           cause: e,
         });
       } else if (error.name === 'ConditionalCheckFailedException') {
-        this.logger.debug(
-          'Condition failed to update item %s',
-          primaryKey.toString(),
-        );
+        this.logger.debug('DynamoDB update skipped: condition not met', { tableKey });
       } else {
-        this.logger.error(
-          'Failed to update item with error: %s',
-          error.message,
-          {
-            tableKey,
-            primaryKey,
-            commands,
-            condition,
-            opts,
-          },
-        );
+        this.logger.error('Failed to update item', { errorName: error.name, tableKey });
         throw new DynamoDBError(500, {
           message: 'Failed to update item',
           cause: e,
@@ -2797,6 +2698,7 @@ export default class DynamoDBService {
       }
     }
 
+    this.logger.debug('DynamoDB update completed', { tableKey, updatedOrCreated: result.updatedOrCreated });
     return result;
   }
 
@@ -2851,6 +2753,7 @@ export default class DynamoDBService {
       ConditionExpression = condition.expression;
     }
 
+    this.logger.debug('DynamoDB request started', { operation: 'deleteOne', tableKey });
     const deleteCommand = new DeleteCommand({
       TableName: table.name,
       Key: keys,
@@ -2882,36 +2785,15 @@ export default class DynamoDBService {
     } catch (e: any) {
       const error = e as Error;
       if (error.name === 'ValidationException') {
-        this.logger.error(
-          'The request parameters are invalid with error: %s',
-          error.message,
-          {
-            tableKey,
-            primaryKey,
-            condition,
-            opts,
-          },
-        );
+        this.logger.error('The request parameters are invalid', { errorName: error.name, tableKey });
         throw new DynamoDBError(400, {
           message: 'Invalid request parameters',
           cause: e,
         });
       } else if (error.name === 'ConditionalCheckFailedException') {
-        this.logger.debug(
-          'Condition failed to delete item %s',
-          primaryKey.toString(),
-        );
+        this.logger.debug('DynamoDB delete skipped: condition not met', { tableKey });
       } else {
-        this.logger.error(
-          'Failed to delete item with error: %s',
-          error.message,
-          {
-            tableKey,
-            primaryKey,
-            condition,
-            opts,
-          },
-        );
+        this.logger.error('Failed to delete item', { errorName: error.name, tableKey });
         throw new DynamoDBError(500, {
           message: 'Failed to delete item',
           cause: e,
@@ -2938,6 +2820,7 @@ export default class DynamoDBService {
       }
     }
 
+    this.logger.debug('DynamoDB deleteOne completed', { tableKey, deleted: result.deleted });
     return result;
   }
 
@@ -2977,6 +2860,7 @@ export default class DynamoDBService {
     while (keys.length > 0) {
       const batch = keys.splice(0, 25);
 
+      this.logger.debug('DynamoDB batch request started', { operation: 'deleteMany', tableKey, itemCount: batch.length });
       const batchWriteCommand = new BatchWriteCommand({
         RequestItems: {
           [table.name]: batch.map(key => ({
@@ -2992,15 +2876,7 @@ export default class DynamoDBService {
       const { UnprocessedItems } = await this.ddbDocClient
         .send(batchWriteCommand)
         .catch((e: Error) => {
-          this.logger.error(
-            'Failed to delete items with error: %s',
-            e.message,
-            {
-              tableKey,
-              keys: batch,
-              opts,
-            },
-          );
+          this.logger.error('Failed to delete items', { errorName: e.name, tableKey });
           throw new DynamoDBError(500, {
             message: 'Failed to delete items',
             cause: e,
@@ -3010,12 +2886,15 @@ export default class DynamoDBService {
       const unprocessedItems = UnprocessedItems?.[table.name];
       if (unprocessedItems !== undefined && unprocessedItems.length > 0) {
         if (unprocessedAttempt >= MAX_UNPROCESSED_ATTEMPTS) {
+          this.logger.error('DynamoDB batch retry limit reached', { operation: 'deleteMany', tableKey, retryCount: unprocessedAttempt });
           throw new DynamoDBError(500, {
             message: 'Failed to delete items after multiple attempts',
             cause: new Error('Too many unprocessed items'),
           });
         }
-        await sleep(backoffDelayMs(unprocessedAttempt));
+        const delayMs = backoffDelayMs(unprocessedAttempt);
+        this.logger.warn('DynamoDB retrying unprocessed batch items', { operation: 'deleteMany', tableKey, itemCount: unprocessedItems.length, attempt: unprocessedAttempt + 1, delayMs });
+        await sleep(delayMs);
         unprocessedAttempt += 1;
         keys.push(
           ...(unprocessedItems
@@ -3027,6 +2906,7 @@ export default class DynamoDBService {
       }
     }
 
+    this.logger.debug('DynamoDB deleteMany completed', { tableKey, itemCount: result.numberOfItems });
     return result;
   }
 
