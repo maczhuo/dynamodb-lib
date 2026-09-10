@@ -255,3 +255,61 @@ describe('failure paths and API combinations', () => {
     expect(condition.expressionAttributeNameMap.size).toBe(1); expect(condition.expressionAttributeValueMap!.size).toBe(1);
   });
 });
+
+describe('operational logging', () => {
+  it('reports read outcomes without logging keys, items, or error messages', async () => {
+    vi.clearAllMocks();
+    const { service, send } = setup();
+    send.mockResolvedValueOnce({ Item: { Id: 'private-key', Token: 'private-value' } } as never)
+      .mockResolvedValueOnce({ Item: { Id: 'private-key', ExpiresAt: 1 } } as never)
+      .mockResolvedValueOnce({} as never)
+      .mockRejectedValueOnce(Object.assign(new Error('private-error-message'), { name: 'ValidationException' }));
+    await service.getOne('items', 'private-key');
+    await service.getOne('items', 'private-key');
+    await service.getOne('items', 'private-key');
+    await expect(service.getOne('items', 'private-key')).rejects.toMatchObject({ status: 400 });
+    for (const outcome of ['found', 'expired', 'not-found']) {
+      expect(logger.debug).toHaveBeenCalledWith('DynamoDB getOne completed', { tableKey: 'items', outcome });
+    }
+    expect(logger.error).toHaveBeenCalledWith('The request parameters are invalid', { tableKey: 'items', errorName: 'ValidationException' });
+    expect(JSON.stringify([logger.debug.mock.calls, logger.error.mock.calls])).not.toContain('private-');
+  });
+
+  it('keeps expected condition failures at debug level and omits expressions and values', async () => {
+    vi.clearAllMocks();
+    const { service, send } = setup();
+    send.mockRejectedValue(Object.assign(new Error('private-error'), { name: 'ConditionalCheckFailedException' }));
+    await service.update('items', 'private-key', [lib.Assign('token', 'private-value')], lib.Equal('token', 'private-condition'));
+    await service.deleteOne('items', 'private-key', lib.Equal('token', 'private-condition'));
+    await service.createOne('items', 'private-key', { token: 'private-value' }, { onConflict: 'ignore' });
+    expect(logger.warn).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
+    expect(logger.debug).toHaveBeenCalledWith('DynamoDB update skipped: condition not met', { tableKey: 'items' });
+    expect(JSON.stringify(logger.debug.mock.calls)).not.toContain('private-');
+  });
+
+  it.each(['getMany', 'createMany', 'deleteMany'] as const)('%s explains retry delay without logging batch payloads', async method => {
+    vi.clearAllMocks(); vi.useFakeTimers();
+    const { service, send } = setup();
+    const key = { Id: 'private-key' };
+    const response = method === 'getMany' ? { UnprocessedKeys: { 'test-items': { Keys: [key] } } }
+      : { UnprocessedItems: { 'test-items': [method === 'createMany' ? { PutRequest: { Item: { ...key, Token: 'private-value' } } } : { DeleteRequest: { Key: key } }] } };
+    send.mockResolvedValueOnce(response as never).mockResolvedValue({} as never);
+    const promise = method === 'createMany' ? service.createMany('items', ['private-key'], [{ token: 'private-value' }]) : service[method]('items', ['private-key']);
+    await vi.runAllTimersAsync(); await promise;
+    expect(logger.warn).toHaveBeenCalledWith('DynamoDB retrying unprocessed batch items', expect.objectContaining({ operation: method, tableKey: 'items', itemCount: 1, attempt: 1, delayMs: expect.any(Number) }));
+    expect(logger.debug).toHaveBeenCalledWith(`DynamoDB ${method} completed`, expect.any(Object));
+    expect(JSON.stringify([logger.debug.mock.calls, logger.warn.mock.calls])).not.toContain('private-');
+  });
+
+  it('reports transaction conflicts and completion without cancellation messages or items', async () => {
+    vi.clearAllMocks(); vi.useFakeTimers();
+    const { service, send } = setup();
+    send.mockRejectedValueOnce(Object.assign(new Error('private-error'), { name: 'TransactionCanceledException', CancellationReasons: [{ Code: 'TransactionConflict', Message: 'private-reason' }] })).mockResolvedValue({} as never);
+    const promise = service.transaction({ mode: lib.DynamoDBTransactionMode.WRITE }).createOne('items', 'private-key', { token: 'private-value' }).commit();
+    await vi.runAllTimersAsync(); await promise;
+    expect(logger.warn).toHaveBeenCalledWith('DynamoDB retrying transaction conflict', { mode: 'WRITE', attempt: 1, maxAttempts: 3, delayMs: 50 });
+    expect(logger.debug).toHaveBeenCalledWith('DynamoDB transaction completed', { mode: 'WRITE', itemCount: 1 });
+    expect(JSON.stringify([logger.debug.mock.calls, logger.warn.mock.calls])).not.toContain('private-');
+  });
+});
