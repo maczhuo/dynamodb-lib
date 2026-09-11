@@ -2,7 +2,7 @@ import winston from 'winston';
 import { PassThrough } from 'node:stream';
 import { once } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { DynamoDBDocumentClient, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, NumberValue, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import * as lib from '../src/index.js';
 const tables = new Map([['items', { name: 'test-items', partitionKey: 'Id', partitionKeyType: 'S' as const, timeToLiveAttribute: 'ExpiresAt' }]]);
 const logger = { debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -53,6 +53,87 @@ describe('expressions', () => {
     expect(e.expression).toContain(' AND (');
     expect(lib.Not(lib.And(lib.Equal('x', 1), lib.Equal('y', 2))).expression).toMatch(/^NOT \(/);
   });
+  it('describe() exposes a serializable snapshot of names, values and group', () => {
+    const condition = lib.And(lib.Equal('VersionStamp', 'vs-1'), lib.LessThan('ExpiresAt', 100));
+    expect(condition.describe()).toEqual({
+      expression: '#attr0_0 = :val0_0 AND #attr1_0 < :val1_0',
+      expressionAttributeNames: { '#attr0_0': 'VersionStamp', '#attr1_0': 'ExpiresAt' },
+      expressionAttributeValues: { ':val0_0': 'vs-1', ':val1_0': 100 },
+    });
+
+    expect(lib.Assign('Value.scope[0]', 'openid').describe()).toEqual({
+      expression: '#attr0.#attr1[0] = :val0',
+      expressionAttributeNames: { '#attr0': 'Value', '#attr1': 'scope' },
+      expressionAttributeValues: { ':val0': 'openid' },
+      updateExpressionGroup: 'SET',
+    });
+  });
+  it('describe() omits the update group for predicates and returns {} for value-less expressions', () => {
+    const described = lib.AttributeExists('ItemLabel').describe();
+    expect(described.expressionAttributeNames).toEqual({ '#attr0': 'ItemLabel' });
+    expect(described.expressionAttributeValues).toEqual({});
+    expect('updateExpressionGroup' in described).toBe(false);
+  });
+  it('describe() preserves native values in JSON without precision or binary data loss', () => {
+    const bytes = new Uint8Array([0, 1, 2, 255]);
+    const description = lib.Assign('value', {
+      count: 9007199254740993n,
+      precise: NumberValue.from('12345678901234567890.123'),
+      tags: new Set(['a', 'b']),
+      binarySet: new Set([Buffer.from([1, 2])]),
+      buffer: Buffer.from([1, 2]),
+      view: new DataView(bytes.buffer, 1, 2),
+      arrayBuffer: bytes.buffer,
+      list: [null, true, 42, 'hello', undefined, NaN, Infinity, -Infinity],
+      map: new Map([['count', 1n]]),
+    }).describe();
+    expect(JSON.parse(JSON.stringify(description))).toEqual(description);
+    expect(description.expressionAttributeValues[':val0']).toEqual({
+      count: { $type: 'BigInt', value: '9007199254740993' },
+      precise: { $type: 'NumberValue', value: '12345678901234567890.123' },
+      tags: { $type: 'Set', values: ['a', 'b'] },
+      binarySet: { $type: 'Set', values: [{ $type: 'Binary', encoding: 'base64', value: 'AQI=' }] },
+      buffer: { $type: 'Binary', encoding: 'base64', value: 'AQI=' },
+      view: { $type: 'Binary', encoding: 'base64', value: 'AQI=' },
+      arrayBuffer: { $type: 'Binary', encoding: 'base64', value: 'AAEC/w==' },
+      list: [null, true, 42, 'hello', { $type: 'Undefined' },
+        { $type: 'Number', value: 'NaN' }, { $type: 'Number', value: 'Infinity' }, { $type: 'Number', value: '-Infinity' }],
+      map: { $type: 'Map', entries: [['count', { $type: 'BigInt', value: '1' }]] },
+    });
+    expect(lib.SetAdd('tags', new Set(['a'])).describe().expressionAttributeValues)
+      .toEqual({ ':val0': { $type: 'Set', values: ['a'] } });
+  });
+  it('describe() detaches nested values and permits shared references', () => {
+    const shared = { items: [1], tags: new Set(['a']), bytes: Buffer.from([1]) };
+    const expression = lib.Assign('value', { first: shared, second: shared });
+    const description = expression.describe();
+    const saved = JSON.stringify(description);
+    shared.items.push(2);
+    shared.tags.add('b');
+    shared.bytes[0] = 2;
+    expect(JSON.stringify(description)).toBe(saved);
+    expect(expression.describe()).not.toEqual(description);
+  });
+  it('describe() preserves special object keys as JSON data', () => {
+    const value = JSON.parse('{"__proto__":{"x":1},"constructor":2}');
+    expect(lib.Assign('value', value).describe().expressionAttributeValues[':val0']).toEqual(value);
+  });
+  it('describe() rejects cycles with a clear error', () => {
+    const object: Record<string, unknown> = {};
+    object.self = object;
+    const set = new Set<unknown>();
+    set.add(set);
+    const map = new Map();
+    map.set('self', map);
+    for (const value of [object, set, map]) {
+      expect(() => lib.Assign('value', value).describe()).toThrow('Cannot describe circular expression value');
+    }
+  });
+  it.each([Symbol('x'), () => 1, new Date(), { [Symbol('key')]: 1 }])(
+    'describe() rejects unsupported values instead of silently dropping data (%#)', value => {
+      expect(() => lib.Assign('value', value).describe()).toThrow(TypeError);
+    },
+  );
   it.each([
     () => lib.Between('x', 3, 1), () => lib.In('x', []), () => lib.Increment('x', NaN),
     () => lib.Decrement('x', Infinity), () => lib.ListAppend('x', 1 as any),
