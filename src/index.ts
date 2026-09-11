@@ -10,6 +10,7 @@ import {
 } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
+  NumberValue,
   GetCommand,
   BatchGetCommand,
   QueryCommand,
@@ -734,6 +735,69 @@ export function SetDelete(attribute: string, value: Set<any>) {
   );
 }
 
+/** JSON-compatible value used by expression descriptions. */
+export type DynamoDBExpressionSerializedValue =
+  | null | boolean | number | string
+  | DynamoDBExpressionSerializedValue[]
+  | { [key: string]: DynamoDBExpressionSerializedValue };
+
+function serializeExpressionValue(
+  value: unknown,
+  ancestors = new Set<object>(),
+): DynamoDBExpressionSerializedValue {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : { $type: 'Number', value: String(value) };
+  }
+  if (typeof value === 'bigint') return { $type: 'BigInt', value: value.toString() };
+  if (value === undefined) return { $type: 'Undefined' };
+  if (typeof value !== 'object') {
+    throw new TypeError(`Cannot describe expression value of type ${typeof value}`);
+  }
+  if (ancestors.has(value)) throw new TypeError('Cannot describe circular expression value');
+  ancestors.add(value);
+  try {
+    if (value instanceof NumberValue) return { $type: 'NumberValue', value: value.toString() };
+    if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
+      const bytes = value instanceof ArrayBuffer
+        ? Buffer.from(value)
+        : Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+      return { $type: 'Binary', encoding: 'base64', value: bytes.toString('base64') };
+    }
+    if (value instanceof Set) {
+      return { $type: 'Set', values: Array.from(value, item => serializeExpressionValue(item, ancestors)) };
+    }
+    if (Array.isArray(value)) return Array.from(value, item => serializeExpressionValue(item, ancestors));
+    if (value instanceof Map) {
+      return { $type: 'Map', entries: Array.from(value, ([key, item]) => [
+        serializeExpressionValue(key, ancestors), serializeExpressionValue(item, ancestors),
+      ]) };
+    }
+    if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) {
+      throw new TypeError('Cannot describe unsupported expression value object');
+    }
+    if (Object.getOwnPropertySymbols(value).some(key => Object.prototype.propertyIsEnumerable.call(value, key))) {
+      throw new TypeError('Cannot describe expression value with symbol keys');
+    }
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+      key, serializeExpressionValue(item, ancestors),
+    ]));
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+export type DynamoDBExpressionDescription = {
+  /** DynamoDB expression string, e.g. `#attr0 = :val0`. */
+  expression: string;
+  /** Placeholder -> attribute name (e.g. `#attr0` -> `VersionStamp`). */
+  expressionAttributeNames: Record<string, string>;
+  /** Placeholder -> JSON-compatible value; native non-JSON values use explicit `$type` tags. */
+  expressionAttributeValues: Record<string, DynamoDBExpressionSerializedValue>;
+  /** Which update clause the expression belongs to (SET/REMOVE/ADD/DELETE). */
+  updateExpressionGroup?: 'SET' | 'REMOVE' | 'ADD' | 'DELETE';
+};
+
 export class DynamoDBExpression {
   constructor(
     public expressionAttributeNameMap: Map<string, string> = new Map(), // e.g. #attr0 -> attribute
@@ -741,6 +805,30 @@ export class DynamoDBExpression {
     public expression: string = '',
     public updateExpressionGroup?: 'SET' | 'REMOVE' | 'ADD' | 'DELETE',
   ) { }
+
+  /**
+   * Detached, JSON-serializable description of the expression. Intended for logging,
+   * debugging, and unit tests that need to assert on a built expression
+   * without reaching into the internal Maps.
+   * Sets, bigint, binary, Maps, NumberValue, undefined and non-finite numbers
+   * use explicit `$type` tags. Circular and unsupported values throw TypeError.
+   */
+  describe(): DynamoDBExpressionDescription {
+    return {
+      expression: this.expression,
+      expressionAttributeNames: Object.fromEntries(
+        this.expressionAttributeNameMap,
+      ),
+      expressionAttributeValues: this.expressionAttributeValueMap
+        ? Object.fromEntries(Array.from(this.expressionAttributeValueMap, ([key, value]) => [
+          key, serializeExpressionValue(value),
+        ]))
+        : {},
+      ...(this.updateExpressionGroup !== undefined
+        ? { updateExpressionGroup: this.updateExpressionGroup }
+        : {}),
+    };
+  }
 }
 
 export enum DynamoDBTransactionMode {

@@ -102,6 +102,31 @@ The constructor accepts independent configurations, rather than using one proces
 
 **Update Expression builders** compose the changes passed to `update` as a command array: `Assign`, `AssignIfNotExists`, `Increment`, `Decrement`, `ListAppend`, `ListPrepend`, `Remove`, `SetAdd`, `SetDelete`.
 
+### Inspecting expressions in unit tests
+
+Call `expression.describe()` for a detached, JSON-serializable snapshot containing `expression`, `expressionAttributeNames`, `expressionAttributeValues`, and (for updates) `updateExpressionGroup`. Expressions without values return an empty values object.
+
+```ts
+const description = SetAdd('tags', new Set(['a', 'b'])).describe();
+// description.expressionAttributeValues:
+// { ':val0': { $type: 'Set', values: ['a', 'b'] } }
+const json = JSON.stringify(description);
+```
+
+Strings, booleans, null, finite numbers, arrays and plain objects keep their JSON shape. Nested native values use these explicit representations:
+
+| Native value | Description |
+| --- | --- |
+| `bigint` | `{ $type: 'BigInt', value: '9007199254740993' }` |
+| SDK `NumberValue` | `{ $type: 'NumberValue', value: '123.456' }` |
+| `Set` | `{ $type: 'Set', values: [...] }` |
+| `Buffer`, `ArrayBuffer`, typed array or `DataView` | `{ $type: 'Binary', encoding: 'base64', value: 'AQI=' }` |
+| `Map` | `{ $type: 'Map', entries: [[key, value], ...] }` |
+| `undefined` | `{ $type: 'Undefined' }` |
+| `NaN`, positive/negative infinity | `{ $type: 'Number', value: 'NaN' }` (or `'Infinity'` / `'-Infinity'`) |
+
+Sets and Maps retain insertion order. Binary views serialize only their visible bytes. Circular references, functions, symbols, enumerable symbol keys, and unsupported class instances (including `Date` and `Blob`) throw `TypeError`. Serialization does not validate whether a value is accepted by DynamoDB. This format is for inspection and assertions, not deserialization or sending to DynamoDB; plain objects containing `$type` remain plain objects. The live expression and its values are unchanged.
+
 ## Detailed documentation
 
 See the [documentation index](doc/README.md) for [every service method](doc/service.md), [configuration](doc/configuration.md), [Condition Expression and Update Expression builders](doc/expressions.md), [transaction methods](doc/transactions.md), and [examples](doc/examples.md).
